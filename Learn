@@ -1,0 +1,259 @@
+// src/api/encryption.js
+import CryptoJS from 'crypto-js';
+
+const SECRET_KEY = '32-char-secret-key-for-AES-256';
+
+export const encryptData = (data) => {
+  return CryptoJS.AES.encrypt(JSON.stringify(data), SECRET_KEY).toString();
+};
+
+export const decryptData = (encryptedData) => {
+  const bytes = CryptoJS.AES.decrypt(encryptedData, SECRET_KEY);
+  return JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
+};
+
+// src/api/teacher.js
+import { encryptData, decryptData } from './encryption';
+
+export const fetchActivities = async (page = 1, pageSize = 10) => {
+  try {
+    const response = await fetch(`/api/activities?page=${page}&limit=${pageSize}`);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const encryptedData = await response.json();
+    return decryptData(encryptedData.data);
+  } catch (error) {
+    console.error('Failed to fetch activities:', error);
+    throw error;
+  }
+};
+
+export const createActivity = async (topic) => {
+  try {
+    const encryptedBody = encryptData({ topic });
+    
+    const response = await fetch('/api/create-activity', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/encrypted-json',
+      },
+      body: JSON.stringify({ data: encryptedBody }),
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    
+    const encryptedResponse = await response.json();
+    return decryptData(encryptedResponse.data);
+  } catch (error) {
+    console.error('Failed to create activity:', error);
+    throw error;
+  }
+};
+
+// src/components/ErrorBoundary.jsx
+import React, { Component } from 'react';
+
+export default class ErrorBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, errorInfo) {
+    console.error('Error caught by boundary:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="error-boundary">
+          <h2>خطایی رخ داده است!</h2>
+          <p>{this.state.error.message}</p>
+          <button onClick={() => window.location.reload()}>
+            بارگذاری مجدد صفحه
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// src/pages/TeacherDashboard.jsx
+import React, { useState, useEffect } from 'react';
+import { createActivity, fetchActivities } from '../api/teacher';
+import PDFDownloader from '../components/PDFDownloader';
+import ErrorBoundary from '../components/ErrorBoundary';
+import { useErrorHandler } from '../hooks/useErrorHandler';
+
+export default function TeacherDashboard() {
+  const [activities, setActivities] = useState([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(true);
+  const [isLoading, setIsLoading] = useState(false);
+  const { error, handleError } = useErrorHandler();
+
+  const loadActivities = async () => {
+    if (isLoading || !hasMore) return;
+    
+    setIsLoading(true);
+    try {
+      const newActivities = await fetchActivities(page);
+      
+      setActivities(prev => [...prev, ...newActivities.items]);
+      setPage(prev => prev + 1);
+      setHasMore(newActivities.hasMore);
+    } catch (err) {
+      handleError('بارگیری فعالیت‌ها ناموفق بود', err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadActivities();
+  }, []);
+
+  const handleCreateActivity = async () => {
+    try {
+      const newActivity = await createActivity('ریاضی اول');
+      setActivities(prev => [newActivity, ...prev]);
+    } catch (err) {
+      handleError('ایجاد فعالیت جدید ناموفق بود', err);
+    }
+  };
+
+  return (
+    <ErrorBoundary>
+      <div className="teacher-dashboard">
+        <h1>پنل مدیریت معلم</h1>
+        
+        <button 
+          onClick={handleCreateActivity}
+          disabled={isLoading}
+          className="create-activity-btn"
+        >
+          ایجاد فعالیت جدید
+        </button>
+        
+        {error && (
+          <div className="error-alert">
+            <p>{error.message}</p>
+            <button onClick={() => window.location.reload()}>تلاش مجدد</button>
+          </div>
+        )}
+        
+        <div className="activities-grid">
+          {activities.map(activity => (
+            <div key={activity.id} className="activity-card">
+              <h3>{activity.title}</h3>
+              <PDFDownloader content={activity.pdf} />
+              <div className="activity-meta">
+                <span>تاریخ ایجاد: {new Date(activity.createdAt).toLocaleDateString('fa-IR')}</span>
+                <span>تعداد دانش‌آموزان: {activity.studentCount}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+        
+        {hasMore && (
+          <button 
+            onClick={loadActivities} 
+            disabled={isLoading}
+            className="load-more-btn"
+          >
+            {isLoading ? 'در حال بارگیری...' : 'بارگیری بیشتر'}
+          </button>
+        )}
+      </div>
+    </ErrorBoundary>
+  );
+}
+
+// src/pages/GroupAnalysis.jsx
+import React, { useState, useEffect } from 'react';
+import { ForceGraph2D } from 'react-force-graph';
+import { useWebSocket } from '../hooks/useWebSocket';
+
+export default function GroupOptimizer({ students }) {
+  const [graphData, setGraphData] = useState({ nodes: [], links: [] });
+  const { realTimeUpdates } = useWebSocket('wss://api.darsan.edu/ws/group-activity');
+
+  useEffect(() => {
+    const updateGraph = () => {
+      const nodes = students.map(s => ({
+        id: s.id,
+        name: s.name,
+        trait: s.trait,
+        val: s.interactionCount * 2 + 1,
+      }));
+      
+      const links = calculateCompatibilityLinks(students, realTimeUpdates);
+      setGraphData({ nodes, links });
+    };
+    
+    updateGraph();
+    
+    const interval = setInterval(updateGraph, 30000);
+    return () => clearInterval(interval);
+  }, [students, realTimeUpdates]);
+
+  return (
+    <div className="group-optimizer">
+      <h2>بهینه‌سازی گروه‌های یادگیری</h2>
+      <ForceGraph2D
+        graphData={graphData}
+        nodeLabel="name"
+        nodeColor={node => {
+          const traits = {
+            'رهبر': '#E74C3C',
+            'کاوشگر': '#3498DB',
+            'خلاق': '#2ECC71',
+            'تحلیل‌گر': '#F39C12',
+            'همکار': '#9B59B6',
+          };
+          return traits[node.trait] || '#95A5A6';
+        }}
+        linkColor={() => 'rgba(200, 200, 200, 0.4)'}
+        linkWidth={2}
+        nodeCanvasObject={(node, ctx) => {
+          const size = 8 + (node.val || 0);
+          ctx.fillStyle = node.color;
+          ctx.beginPath();
+          ctx.arc(node.x, node.y, size, 0, 2 * Math.PI, false);
+          ctx.fill();
+          
+          ctx.fillStyle = '#fff';
+          ctx.font = '6px Sans-Serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(node.name, node.x, node.y);
+        }}
+      />
+      <div className="legend">
+        {Object.entries({
+          'رهبر': '#E74C3C',
+          'کاوشگر': '#3498DB',
+          'خلاق': '#2ECC71',
+          'تحلیل‌گر': '#F39C12',
+          'همکار': '#9B59B6',
+        }).map(([trait, color]) => (
+          <div key={trait} className="legend-item">
+            <span className="color-dot" style={{ backgroundColor: color }}></span>
+            <span>{trait}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
